@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -14,22 +15,31 @@ import (
 type server struct {
 	httpServer *http.Server
 	store      store.Store
+	logger     *log.Logger
 	cancel     context.CancelFunc
 }
 
-func newServer(store store.Store, port int, cancel context.CancelFunc) *server {
+func (s *server) requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.logger.Printf("Served request: %s %s", r.Method, r.URL.Path)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func newServer(store store.Store, logger *log.Logger, port int, cancel context.CancelFunc) *server {
 	mux := http.NewServeMux()
+
+	s := &server{
+		store:  store,
+		logger: logger,
+		cancel: cancel,
+	}
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
-		Handler: mux,
+		Handler: s.requestLogger(mux),
 	}
-
-	s := &server{
-		httpServer: srv,
-		store:      store,
-		cancel:     cancel,
-	}
+	s.httpServer = srv
 
 	mux.HandleFunc("GET /", s.handlerIndex)
 	mux.Handle("POST /api/login", s.authMiddleware(http.HandlerFunc(s.handlerLogin)))
