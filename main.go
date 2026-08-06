@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -11,13 +12,57 @@ import (
 	"syscall"
 	"time"
 
+	"boot.dev/linko/internal/linkoerr"
 	"boot.dev/linko/internal/store"
+	pkgerr "github.com/pkg/errors"
 )
 
+type stackTracer interface {
+	error
+	StackTrace() pkgerr.StackTrace
+}
+
+type multiError interface {
+	error
+	Unwrap() []error
+}
+
+func errorAttrs(err error) []slog.Attr {
+	attrs := []slog.Attr{
+		slog.String("message", err.Error()),
+	}
+	attrs = append(attrs, linkoerr.Attrs(err)...)
+	if stackErr, ok := errors.AsType[stackTracer](err); ok {
+		attrs = append(attrs, slog.String("stack_trace", fmt.Sprintf("%+v", stackErr.StackTrace())))
+	}
+	return attrs
+}
+
+func replaceAttr(groups []string, a slog.Attr) slog.Attr {
+	if a.Key == "error" {
+		err, ok := a.Value.Any().(error)
+		if !ok {
+			return a
+		}
+		if multiErr, ok := errors.AsType[multiError](err); ok {
+			var attrs []slog.Attr
+			for i, err := range multiErr.Unwrap() {
+				key := fmt.Sprintf("error_%d", i+1)
+				attrs = append(attrs, slog.GroupAttrs(key, errorAttrs(err)...))
+			}
+			return slog.GroupAttrs("errors", attrs...)
+		}
+		return slog.GroupAttrs("error", errorAttrs(err)...)
+	}
+	return a
+}
+
 func initializeLogger() (*slog.Logger, func(), error) {
+
 	logFile := os.Getenv("LINKO_LOG_FILE")
 	stderrHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level:       slog.LevelDebug,
+		ReplaceAttr: replaceAttr,
 	})
 	if logFile == "" {
 		return slog.New(stderrHandler), func() {}, nil
@@ -29,7 +74,8 @@ func initializeLogger() (*slog.Logger, func(), error) {
 	}
 	buff := bufio.NewWriterSize(f, 8192)
 	fileHandler := slog.NewJSONHandler(buff, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level:       slog.LevelInfo,
+		ReplaceAttr: replaceAttr,
 	})
 	multiHandler := slog.NewMultiHandler(stderrHandler, fileHandler)
 	return slog.New(multiHandler), func() {
